@@ -119,8 +119,8 @@ vector<DisassemblyResult> Disassembler::Disassemble(CpuType cpuType, uint16_t ba
 	results.reserve(20000);
 
 	DebugConfig& cfg = _settings->GetDebugConfig();
-	bool disUnident = cfg.DisassembleUnidentifiedData;
-	bool disData = cfg.DisassembleVerifiedData;
+	bool disUnident = cfg.DisassembleUnidentifiedData || _forceDisassembleAll;
+	bool disData = cfg.DisassembleVerifiedData || _forceDisassembleAll;
 	bool showUnident = cfg.ShowUnidentifiedData;
 	bool showData = cfg.ShowVerifiedData;
 	bool showJumpLabels = cfg.ShowJumpLabels;
@@ -202,7 +202,7 @@ vector<DisassemblyResult> Disassembler::Disassemble(CpuType cpuType, uint16_t ba
 
 		if(disassemblyInfo.IsInitialized()) {
 			opSize = disassemblyInfo.GetOpSize();
-		} else if((isData && disData) || (!isData && !isCode && disUnident)) {
+		} else if((isData && disData) || (!isData && (disUnident || (_forceDisassembleAll && isCode)))) {
 			disassemblyInfo.Initialize(i, cpuFlags[addrInfo.Address & 0x03], cpuType, relAddress.Type, _memoryDumper);
 			opSize = disassemblyInfo.GetOpSize();
 		}
@@ -664,6 +664,8 @@ int32_t Disassembler::GetMatchingRow(vector<DisassemblyResult>& rows, uint32_t a
 
 uint32_t Disassembler::GetDisassemblyOutput(CpuType type, uint32_t address, CodeLineData output[], uint32_t rowCount)
 {
+	ScopedForceDisassembly force(this);
+
 	uint16_t bank = address >> 16;
 	Timer timer;
 	vector<DisassemblyResult> rows = Disassemble(type, bank);
@@ -707,6 +709,8 @@ uint16_t Disassembler::GetMaxBank(CpuType cpuType)
 
 int32_t Disassembler::GetDisassemblyRowAddress(CpuType cpuType, uint32_t address, int32_t rowOffset)
 {
+	ScopedForceDisassembly force(this);
+
 	uint16_t bank = address >> 16;
 	vector<DisassemblyResult> rows = Disassemble(cpuType, bank);
 	int32_t len = (int32_t)rows.size();

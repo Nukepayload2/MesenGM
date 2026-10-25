@@ -12,13 +12,13 @@ The window's status and logs identify bridge startup failures. An occupied port 
 
 A client can launch the existing `MCPServer.exe` next to `Mesen.exe` with the argument `--stdio`. Resolve the actual installed path; do not assume a build-output directory contains the user's current emulator.
 
-The client owns this bridge process. The bridge can answer initialization without Mesen running, and can reconnect after Mesen restarts. Tool calls still require a running Mesen and, for game inspection, a loaded ROM. HTTP and stdio clients can coexist, but debugger state is shared between them.
+The client owns this bridge process. The bridge can answer initialization without Mesen running, and can reconnect after Mesen restarts. Tool calls still require a running Mesen; game inspection also requires a loaded ROM, which `load_rom` can provide. HTTP and stdio clients can coexist, but debugger state is shared between them.
 
 ## Errors
 
 - **Mesen is not running:** Open the intended emulator session and load the relevant ROM. Retry the observation after it becomes available; restarting the bridge is normally unnecessary.
-- **No ROM is loaded:** Load the user's selected game through Mesen or another available interface. There is no MCP ROM-loading tool in the current implementation.
-- **Tool not found:** Refresh the connected server's tool list. `search_memory`, `save_rom` and `get_screen` exist in this checkout but may be absent from an older installed binary. Do not assume source changes are already running.
+- **No ROM is loaded:** Call `load_rom` with an absolute ROM path, or load the user's selected game through Mesen. `get_rom_info` and `debugger_status` still answer and report `rom_loaded`/emulation state. Avoid loading a different game than the user intended; confirm the path first.
+- **Tool not found:** Refresh the connected server's tool list. `search_memory`, `save_rom`, `save_state`, `load_state` and `get_screen` exist in this checkout but may be absent from an older installed binary. Do not assume source changes are already running.
 - **Mesen did not answer / another call is still running:** Inspect Mesen and its MCP log. The service times out a tool after 10 seconds but lets its worker finish while retaining the request gate. Avoid concurrent retries. Recheck state before repeating a timed-out mutation.
 - **Unknown CPU or memory region:** Refresh `get_rom_info` and use the returned IDs and sizes.
 

@@ -66,6 +66,8 @@ The **MCP Server** window shows the bridge's own status and log output, so a fai
 | --- | --- | --- |
 | `debugger_status` | Reports emulator and debugger status | No |
 | `get_rom_info` | Reports the loaded ROM and available CPU identifiers | No |
+| `load_rom` | Loads a ROM file, optionally with a patch | Yes |
+| `close_rom` | Stops and closes the loaded ROM | Yes |
 | `get_cpu_state` | Reads CPU registers or the current program counter | No |
 | `get_ppu_state` | Reads scanline, cycle, and frame state | No |
 | `get_screen` | Returns the last rendered frame as a PNG image | No |
@@ -79,17 +81,40 @@ The **MCP Server** window shows the bridge's own status and log output, so a fai
 | `step` | Advances debugger execution | Yes |
 | `resume` | Resumes execution | Yes |
 | `pause` | Stops after the next instruction | Yes |
+| `run_frames` | Advances a number of frames, then stops in the debugger | Yes |
+| `set_input` | Holds buttons on a controller until cleared | Yes |
+| `clear_input` | Releases overridden buttons on a controller | Yes |
 | `save_rom` | Writes the loaded ROM or an IPS patch to a file | Yes (writes a file) |
+| `save_state` | Writes a save state file for the loaded game | Yes (writes a file) |
+| `load_state` | Restores a save state file | Yes |
 
 `get_cpu_state` returns structured SNES, NES, and Game Boy registers. Other debugger-supported CPUs return their program counter. `get_ppu_state` currently supports SNES, NES, and Game Boy.
 
+`load_rom` requires an absolute `path` to an existing ROM file; `.lua` scripts are rejected. Optional `patch_path` is an absolute path to an IPS, UPS, or BPS patch applied while loading. Optional `console_type` forces the system for a `.bin` file or another ambiguous ROM; it accepts the `ConsoleType` identifiers 0-6 (Snes=0, Gameboy=1, Nes=2, PcEngine=3, Sms=4, Gba=5, Ws=6). The result contains the same fields as `get_rom_info` plus `success`, `was_running` (whether emulation was running before the call), and `patch_path`. Patches in the ROM's directory are not applied automatically.
+
+`close_rom` takes no arguments. It stops emulation if it is running and returns `success` and `was_running`. It does not release the emulator instance or close Mesen. After it returns, `get_rom_info` reports `rom_loaded: false`, and the other ROM-dependent tools fail with "No ROM is loaded."
+
+`run_frames` advances emulation from the current frame and then stops in the debugger. Its `timeout_ms` is capped at 7000 so the call stays inside the server's 10-second tool budget; the result reports whether the requested frame count was reached.
+
+`set_input` holds the given buttons on one controller and the override persists until `clear_input` or another `set_input` replaces it. It does not release automatically when execution stops, so call `clear_input` when the input is no longer wanted.
+
 `get_screen` returns the most recent frame produced by the video decoder as an MCP `image` content block (`image/png`), followed by a JSON text block with `width`, `height`, `byte_length`, and `frame_count`. By default the PNG is the console's native output with the current rotation applied. Pass `apply_video_filter: true` to include the user's scale or NTSC filter, or `include_base64: true` to also receive the PNG inside the structured result for clients that cannot display image blocks. The frame is whatever the decoder last produced, so while execution is stopped it shows the last completed frame.
+
+### Save states and A/B checks
+
+`save_state` writes a save state for the loaded game. Its `path` must be absolute, the parent directory must already exist, and the target must not be a directory; a `.mst` extension is the convention. An existing file is refused unless `overwrite: true` is passed. The result contains `success`, `path`, `size`, `frame_count`, `console_type_name`, `execution_stopped`, and `emulation_running`. A file that Mesen did not create or that is empty is reported as an error.
+
+`load_state` restores a state written by Mesen, including CPU, memory, and video state. Its `path` must be absolute and the file must exist. It returns `success`, `path`, `frame_count`, `console_type_name`, `execution_stopped`, and `emulation_running`. Both tools require a loaded ROM and work whether or not the debugger was already active.
+
+A useful workflow for risky changes is: `save_state` before an edit, make the change, observe the result, then `load_state` to restore the snapshot and compare behavior. This provides an A/B check without reloading the ROM, and it also provides a rollback point for `set_memory` experiments.
 
 Genesis-specific state tools are not included yet because this branch does not contain the Genesis core and interop types from mesen2-expanded. They can be added without changing the transport layer once those types arrive.
 
+ROM loading (`load_rom`, `close_rom`), controller input (`set_input`, `clear_input`), and save states (`save_state`, `load_state`) are supported. Audio capture and recording are not exposed by these tools; use the Mesen UI when audio output is required.
+
 ## Finding identifiers
 
-Call `get_rom_info` first. Its response includes the CPU identifiers and memory regions available for the loaded ROM. Each memory region has the numeric ID used by the memory tools, its API name, and its size. Invalid or unavailable regions are rejected with an error.
+Call `get_rom_info` first, or call `load_rom` first when the ROM still needs to be loaded. Its response includes the CPU identifiers and memory regions available for the loaded ROM. Each memory region has the numeric ID used by the memory tools, its API name, and its size. Invalid or unavailable regions are rejected with an error. `get_rom_info` and `debugger_status` work without a loaded ROM: `get_rom_info` then returns `rom_loaded: false`, `format: "Unknown"`, an empty `rom_path` and `patch_path`, `console_type: -1`, `console_type_name: "None"`, and empty `cpu_types` and `memory_types` arrays.
 
 Tool results contain both structured content and an equivalent JSON text block. This keeps them usable with clients that have not added structured tool-result support.
 
@@ -104,4 +129,4 @@ An authorized client can read ROM state, change memory, replace breakpoints, and
 - If tool calls report that Mesen is not running, open Mesen and try the request again. The client does not need to restart the bridge.
 - If a tool call reports that Mesen did not answer in time, Mesen is paused in its own debugger or busy. Tool calls time out after 10 seconds so the client stays usable.
 - If HTTP startup fails, choose an unused port in **Debug > MCP Server**. The log panel in that window shows why the bridge stopped.
-- If debugger tools report that no ROM is loaded, load a game before calling them.
+- If debugger tools report that no ROM is loaded, load one with `load_rom` or open a game in the Mesen UI, then retry. `get_rom_info` and `debugger_status` remain available without a ROM.

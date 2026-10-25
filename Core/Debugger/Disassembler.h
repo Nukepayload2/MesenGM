@@ -33,6 +33,25 @@ private:
 
 	DisassemblerSource _sources[DebugUtilities::GetMemoryTypeCount()] = {};
 
+	//Forces CDL-marked code to be decoded instead of collapsed into an
+	//"unidentified" block. Used by the API entry points (MCP bridge), which
+	//must always return real instructions regardless of the display settings.
+	bool _forceDisassembleAll = false;
+
+	struct ScopedForceDisassembly
+	{
+		Disassembler* _owner;
+		bool _previous;
+		explicit ScopedForceDisassembly(Disassembler* owner) : _owner(owner), _previous(owner->_forceDisassembleAll)
+		{
+			owner->_forceDisassembleAll = true;
+		}
+		~ScopedForceDisassembly()
+		{
+			_owner->_forceDisassembleAll = _previous;
+		}
+	};
+
 	void InitSource(MemoryType type);
 	DisassemblerSource& GetSource(MemoryType type);
 

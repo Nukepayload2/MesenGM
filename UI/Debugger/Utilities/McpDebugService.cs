@@ -37,6 +37,15 @@ namespace Mesen.Debugger.Utilities
 			LatestProtocolVersion
 		};
 
+		//These tools must answer before a ROM exists, so a call can discover the
+		//session or load a game from the client.
+		private static readonly HashSet<string> ToolsAllowedWithoutRom = new(StringComparer.Ordinal) {
+			"debugger_status",
+			"get_rom_info",
+			"load_rom",
+			"close_rom"
+		};
+
 		private readonly SemaphoreSlim _toolGate = new(1, 1);
 
 		public string HandleRequest(string body)
@@ -118,9 +127,9 @@ namespace Mesen.Debugger.Utilities
 				},
 				["serverInfo"] = new JsonObject {
 					["name"] = ServerName,
-					["version"] = "1.3.0"
+					["version"] = "1.4.0"
 				},
-				["instructions"] = "Use get_rom_info first to discover the loaded system, CPU type identifiers, and memory region identifiers."
+				["instructions"] = "Use get_rom_info first to discover the loaded system, CPU type identifiers, and memory region identifiers. If no ROM is loaded, load one with load_rom or in the Mesen UI."
 			});
 		}
 
@@ -135,9 +144,32 @@ namespace Mesen.Debugger.Utilities
 				),
 				(JsonNode)MakeToolDef(
 					"get_rom_info",
-					"Get information about the loaded ROM plus the CPU and memory region identifiers available to debugger tools.",
+					"Get information about the loaded ROM plus the CPU and memory region identifiers available to debugger tools. Returns rom_loaded=false and format \"Unknown\" when no ROM is loaded.",
 					EmptySchema(),
 					readOnly: true
+				),
+				(JsonNode)MakeToolDef(
+					"load_rom",
+					"Load a ROM file, optionally applying an IPS, UPS, or BPS patch. Use console_type to force the system for a .bin file or other ambiguous ROM. Returns the same fields as get_rom_info plus success, was_running, and patch_path.",
+					new JsonObject {
+						["type"] = "object",
+						["required"] = StringArray("path"),
+						["properties"] = new JsonObject {
+							["path"] = StringProperty("Absolute path of the ROM file to load. Lua scripts are rejected."),
+							["patch_path"] = StringProperty("Optional absolute path of an IPS, UPS, or BPS patch to apply while loading."),
+							["console_type"] = IntegerProperty("Optional ConsoleType identifier to force: Snes=0, Gameboy=1, Nes=2, PcEngine=3, Sms=4, Gba=5, Ws=6. Use it for .bin files or when detection would pick the wrong system.", minimum: 0, maximum: 6)
+						}
+					},
+					readOnly: false,
+					idempotent: false
+				),
+				(JsonNode)MakeToolDef(
+					"close_rom",
+					"Stop and close the loaded ROM. Returns whether emulation was running before the call. Afterwards get_rom_info reports rom_loaded=false and ROM-dependent tools fail with \"No ROM is loaded.\"",
+					EmptySchema(),
+					readOnly: false,
+					destructive: true,
+					idempotent: true
 				),
 				(JsonNode)MakeToolDef(
 					"get_cpu_state",
@@ -309,11 +341,56 @@ namespace Mesen.Debugger.Utilities
 					},
 					readOnly: false
 				),
+				(JsonNode)MakeToolDef(
+					"run_frames",
+					"Advance emulation from the current frame by a number of frames, then stop in the debugger. Returns the frames actually elapsed. Keeps the total wait within the tool's 10-second budget.",
+					new JsonObject {
+						["type"] = "object",
+						["required"] = StringArray("frames"),
+						["properties"] = new JsonObject {
+							["frames"] = IntegerProperty("Number of frames to advance.", minimum: 1, maximum: 100000),
+							["cpu_type"] = IntegerProperty("CPU type identifier. Omit it to use the loaded system's main CPU."),
+							["timeout_ms"] = IntegerProperty("Maximum time to wait for the frames before stopping. Keep this below the 10-second tool limit.", minimum: 100, maximum: 7000, defaultValue: 5000)
+						}
+					},
+					readOnly: false,
+					idempotent: false
+				),
 				(JsonNode)MakeToolDef("resume", "Resume debugger execution.", EmptySchema(), readOnly: false, idempotent: true),
 				(JsonNode)MakeToolDef("pause", "Break debugger execution after the current instruction.", EmptySchema(), readOnly: false),
 				(JsonNode)MakeToolDef(
+					"set_input",
+					"Override the buttons held on one controller. Button names are case-insensitive: A, B, X, Y, L, R, U, D, Up, Down, Left, Right, Select, Start. The override stays active until clear_input or another set_input call.",
+					new JsonObject {
+						["type"] = "object",
+						["required"] = StringArray("buttons"),
+						["properties"] = new JsonObject {
+							["controller"] = IntegerProperty("Controller index.", minimum: 0, maximum: 7, defaultValue: 0),
+							["buttons"] = new JsonObject {
+								["type"] = "array",
+								["items"] = StringProperty("Button name."),
+								["description"] = "Buttons to hold. Replaces any previous override for this controller."
+							}
+						}
+					},
+					readOnly: false,
+					idempotent: true
+				),
+				(JsonNode)MakeToolDef(
+					"clear_input",
+					"Release all overridden buttons on one controller.",
+					new JsonObject {
+						["type"] = "object",
+						["properties"] = new JsonObject {
+							["controller"] = IntegerProperty("Controller index.", minimum: 0, maximum: 7, defaultValue: 0)
+						}
+					},
+					readOnly: false,
+					idempotent: true
+				),
+				(JsonNode)MakeToolDef(
 					"save_rom",
-					"Write the loaded ROM, including any set_memory edits to its ROM regions, to a file. This is the only tool that writes outside the emulator.",
+					"Write the loaded ROM, including any set_memory edits to its ROM regions, to a file. Use save_state instead to snapshot the running emulator.",
 					new JsonObject {
 						["type"] = "object",
 						["required"] = StringArray("path"),
@@ -326,6 +403,35 @@ namespace Mesen.Debugger.Utilities
 					},
 					readOnly: false,
 					destructive: true,
+					idempotent: true
+				),
+				(JsonNode)MakeToolDef(
+					"save_state",
+					"Write a save state for the loaded game to a file. The path must be absolute and its parent directory must already exist. An existing file is only replaced when overwrite is true. Returns the file size and current frame count.",
+					new JsonObject {
+						["type"] = "object",
+						["required"] = StringArray("path"),
+						["properties"] = new JsonObject {
+							["path"] = StringProperty("Absolute path of the save state file to write. A .mst extension is recommended."),
+							["overwrite"] = BooleanProperty("Allow replacing an existing save state file.", defaultValue: false),
+							["cpu_type"] = IntegerProperty("CPU type identifier used for the reported frame count. Omit it to use the loaded system's main CPU.")
+						}
+					},
+					readOnly: false,
+					idempotent: false
+				),
+				(JsonNode)MakeToolDef(
+					"load_state",
+					"Restore a save state file written by Mesen. Restores CPU, memory, and video state from the file. The path must be absolute and the file must exist. Returns the restored frame count.",
+					new JsonObject {
+						["type"] = "object",
+						["required"] = StringArray("path"),
+						["properties"] = new JsonObject {
+							["path"] = StringProperty("Absolute path of the save state file to load, normally a .mst file."),
+							["cpu_type"] = IntegerProperty("CPU type identifier used for the reported frame count. Omit it to use the loaded system's main CPU.")
+						}
+					},
+					readOnly: false,
 					idempotent: true
 				)
 			};
@@ -342,10 +448,14 @@ namespace Mesen.Debugger.Utilities
 			}
 
 			try {
-				EnsureRomLoaded();
+				if(!ToolsAllowedWithoutRom.Contains(toolName)) {
+					EnsureRomLoaded();
+				}
 				return toolName switch {
 					"debugger_status" => ToolSuccess(id, GetDebuggerStatus()),
 					"get_rom_info" => ToolSuccess(id, GetRomInfo()),
+					"load_rom" => ToolSuccess(id, LoadRom(arguments)),
+					"close_rom" => ToolSuccess(id, CloseRom()),
 					"get_cpu_state" => ToolSuccess(id, GetCpuState(arguments)),
 					"get_ppu_state" => ToolSuccess(id, GetPpuState(arguments)),
 					"get_screen" => GetScreen(id, arguments),
@@ -357,9 +467,14 @@ namespace Mesen.Debugger.Utilities
 					"get_debug_events" => ToolSuccess(id, GetDebugEvents(arguments)),
 					"set_breakpoints" => ToolSuccess(id, SetBreakpoints(arguments)),
 					"step" => ToolSuccess(id, Step(arguments)),
+					"run_frames" => ToolSuccess(id, RunFrames(arguments)),
 					"resume" => ToolSuccess(id, Resume()),
 					"pause" => ToolSuccess(id, Pause()),
+					"set_input" => ToolSuccess(id, SetInput(arguments)),
+					"clear_input" => ToolSuccess(id, ClearInput(arguments)),
 					"save_rom" => ToolSuccess(id, SaveRom(arguments)),
+					"save_state" => ToolSuccess(id, SaveState(arguments)),
+					"load_state" => ToolSuccess(id, LoadState(arguments)),
 					_ => MakeJsonRpcError(id, -32602, $"Unknown tool: {toolName}")
 				};
 			} catch(Exception ex) {
@@ -382,16 +497,22 @@ namespace Mesen.Debugger.Utilities
 		private static JsonObject GetRomInfo()
 		{
 			RomInfo romInfo = EmuApi.GetRomInfo();
+
+			// Stop() destroys the console but leaves the native RomInfo behind, so
+			// the format alone cannot tell whether a ROM is still usable.
+			bool romLoaded = IsRomLoaded(romInfo);
 			JsonArray cpuTypes = new();
-			foreach(CpuType cpuType in romInfo.CpuTypes) {
-				cpuTypes.Add((JsonNode)new JsonObject {
-					["id"] = (int)cpuType,
-					["name"] = cpuType.ToString()
-				});
+			if(romLoaded) {
+				foreach(CpuType cpuType in romInfo.CpuTypes) {
+					cpuTypes.Add((JsonNode)new JsonObject {
+						["id"] = (int)cpuType,
+						["name"] = cpuType.ToString()
+					});
+				}
 			}
 
 			JsonArray memoryTypes = new();
-			if(romInfo.Format != RomFormat.Unknown) {
+			if(romLoaded) {
 				foreach(MemoryType memoryType in Enum.GetValues<MemoryType>()) {
 					int size = memoryType == MemoryType.None ? 0 : DebugApi.GetMemorySize(memoryType);
 					if(size > 0) {
@@ -404,13 +525,79 @@ namespace Mesen.Debugger.Utilities
 				}
 			}
 
+			// Never leak the stale RomInfo left behind by close_rom: without a
+			// running console every identity field is reported as absent.
 			return new JsonObject {
-				["console_type"] = (int)romInfo.ConsoleType,
-				["console_type_name"] = romInfo.ConsoleType.ToString(),
-				["rom_path"] = romInfo.RomPath,
-				["format"] = romInfo.Format.ToString(),
+				["rom_loaded"] = romLoaded,
+				["console_type"] = romLoaded ? (int)romInfo.ConsoleType : -1,
+				["console_type_name"] = romLoaded ? romInfo.ConsoleType.ToString() : "None",
+				["rom_path"] = romLoaded ? romInfo.RomPath : "",
+				// load_rom overwrites this with the patch it applied; get_rom_info
+				// has no way to recover a patch path from the native RomInfo.
+				["patch_path"] = "",
+				["format"] = romLoaded ? romInfo.Format.ToString() : RomFormat.Unknown.ToString(),
 				["cpu_types"] = cpuTypes,
 				["memory_types"] = memoryTypes
+			};
+		}
+
+		private static JsonObject LoadRom(JsonObject? arguments)
+		{
+			string path = RequiredString(arguments, "path");
+			if(!Path.IsPathRooted(path)) {
+				throw new ArgumentException("path must be an absolute path.");
+			}
+			if(string.Equals(Path.GetExtension(path), ".lua", StringComparison.OrdinalIgnoreCase)) {
+				throw new ArgumentException("Lua scripts cannot be loaded as a ROM.");
+			}
+			if(!File.Exists(path)) {
+				throw new ArgumentException($"ROM file does not exist: {path}");
+			}
+
+			string? patchPath = arguments?["patch_path"]?.GetValue<string>();
+			if(string.IsNullOrWhiteSpace(patchPath)) {
+				patchPath = null;
+			} else {
+				if(!Path.IsPathRooted(patchPath)) {
+					throw new ArgumentException("patch_path must be an absolute path.");
+				}
+				if(!File.Exists(patchPath)) {
+					throw new ArgumentException($"Patch file does not exist: {patchPath}");
+				}
+			}
+
+			int? consoleTypeValue = arguments?["console_type"] == null
+				? null
+				: OptionalInt(arguments, "console_type", 0, 0, 6);
+
+			bool wasRunning = EmuApi.IsRunning();
+			bool loaded = consoleTypeValue.HasValue
+				? EmuApi.LoadRomWithConsoleType(path, patchPath, (ConsoleType)consoleTypeValue.Value)
+				: EmuApi.LoadRom(path, patchPath);
+			if(!loaded) {
+				throw new InvalidOperationException($"Mesen could not load {path}.");
+			}
+
+			//InitializeDebugger is idempotent; this also makes later tools work
+			//when the user had already started a game manually.
+			DebugApi.InitializeDebugger();
+
+			JsonObject result = GetRomInfo();
+			result["success"] = true;
+			result["was_running"] = wasRunning;
+			result["patch_path"] = patchPath ?? "";
+			return result;
+		}
+
+		private static JsonObject CloseRom()
+		{
+			bool wasRunning = EmuApi.IsRunning();
+			if(wasRunning) {
+				EmuApi.Stop();
+			}
+			return new JsonObject {
+				["success"] = true,
+				["was_running"] = wasRunning
 			};
 		}
 
@@ -689,6 +876,71 @@ namespace Mesen.Debugger.Utilities
 			};
 		}
 
+		private static JsonObject SaveState(JsonObject? arguments)
+		{
+			CpuType cpuType = GetCpuType(arguments);
+			string path = RequiredString(arguments, "path");
+			if(!Path.IsPathRooted(path)) {
+				throw new ArgumentException("path must be an absolute path.");
+			}
+			bool overwrite = OptionalBool(arguments, "overwrite", false);
+
+			string? directory = Path.GetDirectoryName(path);
+			if(string.IsNullOrEmpty(directory) || !Directory.Exists(directory)) {
+				throw new ArgumentException($"Directory does not exist: {directory}");
+			}
+			if(Directory.Exists(path)) {
+				throw new ArgumentException($"path refers to a directory: {path}");
+			}
+			if(File.Exists(path) && !overwrite) {
+				throw new InvalidOperationException($"State file already exists: {path}. Set overwrite to true to replace it.");
+			}
+
+			EmuApi.SaveStateFile(path);
+
+			// SaveStateFile returns void in the interop layer, so a missing or empty
+			// file is the only way to detect that Mesen refused to write it.
+			FileInfo file = new(path);
+			if(!file.Exists || file.Length == 0) {
+				throw new InvalidOperationException($"Mesen did not write the state file: {path}.");
+			}
+
+			TimingInfo timing = EmuApi.GetTimingInfo(cpuType);
+			return new JsonObject {
+				["success"] = true,
+				["path"] = path,
+				["size"] = file.Length,
+				["frame_count"] = timing.FrameCount,
+				["console_type_name"] = EnsureRomLoaded().ConsoleType.ToString(),
+				["execution_stopped"] = DebugApi.IsDebuggerRunning() && DebugApi.IsExecutionStopped(),
+				["emulation_running"] = EmuApi.IsRunning()
+			};
+		}
+
+		private static JsonObject LoadState(JsonObject? arguments)
+		{
+			CpuType cpuType = GetCpuType(arguments);
+			string path = RequiredString(arguments, "path");
+			if(!Path.IsPathRooted(path)) {
+				throw new ArgumentException("path must be an absolute path.");
+			}
+			if(!File.Exists(path)) {
+				throw new ArgumentException($"State file does not exist: {path}");
+			}
+
+			EmuApi.LoadStateFile(path);
+
+			TimingInfo timing = EmuApi.GetTimingInfo(cpuType);
+			return new JsonObject {
+				["success"] = true,
+				["path"] = path,
+				["frame_count"] = timing.FrameCount,
+				["console_type_name"] = EnsureRomLoaded().ConsoleType.ToString(),
+				["execution_stopped"] = DebugApi.IsDebuggerRunning() && DebugApi.IsExecutionStopped(),
+				["emulation_running"] = EmuApi.IsRunning()
+			};
+		}
+
 		private static bool IsSaveRomSupported(RomFormat format)
 		{
 			return format switch {
@@ -886,6 +1138,139 @@ namespace Mesen.Debugger.Utilities
 			};
 		}
 
+		private static JsonObject RunFrames(JsonObject? arguments)
+		{
+			CpuType cpuType = GetCpuType(arguments);
+			int frames = RequiredInt(arguments, "frames", 1, 100000);
+			int timeoutMs = OptionalInt(arguments, "timeout_ms", 5000, 100, 7000);
+
+			if(!EmuApi.IsRunning()) {
+				throw new InvalidOperationException("No emulation is running.");
+			}
+
+			DebugApi.InitializeDebugger();
+			uint startFrame = EmuApi.GetTimingInfo(cpuType).FrameCount;
+			DebugApi.ResumeExecution();
+
+			bool timedOut = false;
+			uint elapsed = 0;
+			DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+			while(true) {
+				// Unsigned subtraction handles FrameCount wrapping naturally.
+				elapsed = EmuApi.GetTimingInfo(cpuType).FrameCount - startFrame;
+				if(elapsed >= (uint)frames) {
+					break;
+				}
+				if(!EmuApi.IsRunning()) {
+					break;
+				}
+				if(DateTime.UtcNow >= deadline) {
+					timedOut = true;
+					break;
+				}
+				Thread.Sleep(1);
+			}
+
+			bool executionStopped = DebugApi.IsExecutionStopped();
+			if(!executionStopped) {
+				DebugApi.Step(cpuType, 1, StepType.Step);
+				DateTime stopDeadline = DateTime.UtcNow.AddMilliseconds(1000);
+				while(!DebugApi.IsExecutionStopped() && DateTime.UtcNow < stopDeadline) {
+					Thread.Sleep(1);
+				}
+				executionStopped = DebugApi.IsExecutionStopped();
+			}
+
+			elapsed = EmuApi.GetTimingInfo(cpuType).FrameCount - startFrame;
+			return new JsonObject {
+				["success"] = elapsed >= (uint)frames,
+				["frames_requested"] = frames,
+				["frames_elapsed"] = elapsed,
+				["timed_out"] = timedOut,
+				["execution_stopped"] = executionStopped,
+				["emulation_running"] = EmuApi.IsRunning(),
+				["cpu_type"] = (int)cpuType
+			};
+		}
+
+		private static JsonObject SetInput(JsonObject? arguments)
+		{
+			int controller = OptionalInt(arguments, "controller", 0, 0, 7);
+			JsonArray? buttons = arguments?["buttons"] as JsonArray
+				?? throw new ArgumentException("Missing required argument: buttons.");
+
+			DebugControllerState state = new();
+			JsonArray normalizedButtons = new();
+			HashSet<string> seenButtons = new(StringComparer.Ordinal);
+			foreach(JsonNode? node in buttons) {
+				string? name = node?.GetValue<string>();
+				if(string.IsNullOrWhiteSpace(name)) {
+					throw new ArgumentException("Button names must be non-empty strings.");
+				}
+
+				string normalizedName = name.Trim().ToUpperInvariant();
+				if(!seenButtons.Add(normalizedName)) {
+					continue;
+				}
+				ApplyButton(ref state, normalizedName);
+				normalizedButtons.Add((JsonNode)normalizedName);
+			}
+
+			DebugApi.InitializeDebugger();
+			List<int> available = DebugApi.GetAvailableInputOverrides();
+			if(!available.Contains(controller)) {
+				throw new ArgumentException($"Controller {controller} is not available. Available controllers: [{string.Join(", ", available)}]. Configure the input port in Mesen if needed.");
+			}
+			DebugApi.SetInputOverrides((uint)controller, state);
+			return MakeInputResult(controller, normalizedButtons);
+		}
+
+		private static JsonObject ClearInput(JsonObject? arguments)
+		{
+			int controller = OptionalInt(arguments, "controller", 0, 0, 7);
+			DebugApi.InitializeDebugger();
+			DebugApi.SetInputOverrides((uint)controller, new DebugControllerState());
+			return MakeInputResult(controller, new JsonArray());
+		}
+
+		private static void ApplyButton(ref DebugControllerState state, string name)
+		{
+			switch(name) {
+				case "A": state.A = true; break;
+				case "B": state.B = true; break;
+				case "X": state.X = true; break;
+				case "Y": state.Y = true; break;
+				case "L": state.L = true; break;
+				case "R": state.R = true; break;
+				case "U": state.U = true; break;
+				case "UP": state.Up = true; break;
+				case "D": state.D = true; break;
+				case "DOWN": state.Down = true; break;
+				case "LEFT": state.Left = true; break;
+				case "RIGHT": state.Right = true; break;
+				case "SELECT": state.Select = true; break;
+				case "START": state.Start = true; break;
+				default:
+					throw new ArgumentException($"Unknown button: {name}. Valid buttons are: A, B, X, Y, L, R, U, D, Up, Down, Left, Right, Select, Start.");
+			}
+		}
+
+		private static JsonObject MakeInputResult(int controller, JsonArray buttons)
+		{
+			JsonArray availableControllers = new();
+			foreach(int index in DebugApi.GetAvailableInputOverrides()) {
+				availableControllers.Add((JsonNode)index);
+			}
+
+			return new JsonObject {
+				["success"] = true,
+				["controller"] = controller,
+				["buttons"] = buttons,
+				["available_controllers"] = availableControllers,
+				["debugger_running"] = DebugApi.IsDebuggerRunning()
+			};
+		}
+
 		private static CpuType GetCpuType(JsonObject? arguments)
 		{
 			RomInfo romInfo = EnsureRomLoaded();
@@ -915,10 +1300,15 @@ namespace Mesen.Debugger.Utilities
 			return memoryType;
 		}
 
+		private static bool IsRomLoaded(RomInfo romInfo)
+		{
+			return romInfo.Format != RomFormat.Unknown && EmuApi.IsRunning();
+		}
+
 		private static RomInfo EnsureRomLoaded()
 		{
 			RomInfo romInfo = EmuApi.GetRomInfo();
-			if(romInfo.Format == RomFormat.Unknown) {
+			if(!IsRomLoaded(romInfo)) {
 				throw new InvalidOperationException("No ROM is loaded.");
 			}
 			return romInfo;

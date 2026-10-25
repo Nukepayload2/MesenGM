@@ -1,6 +1,6 @@
 ---
 name: mesengm-mcp
-description: Use MesenGM's MCP debugger tools to inspect running games, search and edit memory, examine disassembly and traces, control execution, and export ROM edits or IPS patches. Use for game debugging through the mesen-debugger MCP connection, not for developing the MCP server or changing emulator source code.
+description: Use MesenGM's MCP debugger tools to inspect running games, search and edit memory, examine disassembly and traces, control execution, snapshot and restore emulator state, and export ROM edits or IPS patches. Use for game debugging through the mesen-debugger MCP connection, not for developing the MCP server or changing emulator source code.
 ---
 
 # MesenGM MCP debugger
@@ -10,7 +10,7 @@ Use the connected MesenGM debugger to answer the user's question about a loaded 
 ## Establish the session
 
 1. Discover the available Mesen debugger tools and read their current schemas. Tool prefixes depend on the client's connection name; the names below are the underlying tool names. The running server's schemas take precedence over this skill.
-2. Call `get_rom_info` to identify the loaded ROM and discover `cpu_types` and `memory_types`, including each region's size. Never guess their numeric IDs. Refresh this information after changing ROMs or reconnecting to a different emulator session.
+2. If the user named a ROM and loading it is allowed, call `load_rom` with an absolute path (and `patch_path` or `console_type` only when needed). Otherwise call `get_rom_info` to identify the loaded ROM. Either result lets you discover `cpu_types` and `memory_types`, including each region's size. Never guess their numeric IDs. Refresh this information after changing ROMs or reconnecting to a different emulator session.
 3. Call `debugger_status` before controlling execution. Distinguish `execution_stopped` from `emulation_paused`; a successful handshake or tool listing does not establish that a ROM is running.
 
 If tools are unavailable or calls cannot reach Mesen, read [connection.md](references/connection.md). Do not rebuild the project to establish a connection unless the user requests a build.
@@ -34,6 +34,8 @@ Use execution controls when the requested investigation calls for them. Do not p
 
 `pause` requests a stop after an instruction; `step` returns after requesting execution, not after proving completion. Check `debugger_status` before inspecting the result. Prefer small steps and bounded status checks; stop polling when the requested condition is reached or a useful timeout/error needs attention.
 
+When the task needs the screen to advance, use `run_frames` instead of resuming indefinitely; it advances a bounded frame count and stops again. When it needs controller input, use `set_input` and `clear_input`; an input override stays active until it is cleared or replaced, so release it when the input is no longer wanted.
+
 `set_breakpoints` replaces the entire active list, including breakpoints from other debugger clients. An empty array clears it. The current tool set has no breakpoint-list reader. Reuse the complete list when it is already known. If the user asks to add a breakpoint while preserving an unknown list, obtain that list through the UI or ask for the missing information before replacing it. Do not claim to have preserved breakpoints that were never read.
 
 When a task is observational, restore the original running/stopped state if the task changed it. Leave execution stopped when that is the requested result, such as investigating a breakpoint hit, and report that state.
@@ -42,17 +44,19 @@ When a task is observational, restore the original running/stopped state if the 
 
 For an authorized memory edit, read and retain the original bytes for the affected range, write only the requested bytes, then read the range back. Use either `hex` or `data` in `set_memory`, not both.
 
+Before a risky edit, call `save_state` with an absolute path whose parent directory exists; after observing the result, call `load_state` with the same path to roll back and compare the original behavior. This A/B check is usually safer than reloading the ROM, which also resets unrelated progress. A state file is only overwritten when `overwrite` is true.
+
 `set_memory` uses the debugger's bulk memory-edit path with CPU bus side effects disabled. Do not use it as a substitute for a CPU write to a mapper, APU or PPU register. To investigate register behavior, observe or step the game's actual writes.
 
-Editing a ROM region changes the emulator's loaded copy. `save_rom` exports those edits to a ROM or IPS file; it is not a save-state tool. Use an absolute destination path with an existing parent directory. Keep `overwrite` false and `cdl_strip_option` at 0 unless the user's request calls for different behavior. A request to inspect or temporarily edit memory does not imply a request to export or overwrite a file.
+Editing a ROM region changes the emulator's loaded copy. `save_rom` exports those edits to a ROM or IPS file; it is not a save-state tool, so use `save_state` and `load_state` when the goal is to snapshot or restore the running console. Use an absolute destination path with an existing parent directory. Keep `overwrite` false and `cdl_strip_option` at 0 unless the user's request calls for different behavior. A request to inspect or temporarily edit memory does not imply a request to export or overwrite a file.
 
 Follow existing authorization for edits and exports without asking again. If a mutation times out, check its resulting state before retrying: the server's worker can continue after the timeout response.
 
 ## Report the result
 
-State the finding, the relevant addresses and bytes, and the observations supporting it. Distinguish a suspected cause from one reproduced by execution. For edits, include the changed range and verification result; for exports, include the output path. Mention any remaining breakpoint or execution-state changes.
+State the finding, the relevant addresses and bytes, and the observations supporting it. Distinguish a suspected cause from one reproduced by execution. For edits, include the changed range and verification result; for exports or save states, include the output path. Mention any remaining breakpoint or execution-state changes.
 
-These tools do not provide ROM loading, controller input, audio capture or save-state management. `get_screen` is the only visual output; there is no tilemap, sprite or palette viewer tool. Use another available interface when the task needs those capabilities; do not fabricate tool calls or claim a listening test from memory inspection alone.
+These tools do not provide audio capture or recording. `get_screen` is the only visual output; there is no tilemap, sprite or palette viewer tool. Use another available interface when the task needs those capabilities; do not fabricate tool calls or claim a listening test from memory inspection alone.
 
 ## Source of project-specific behavior
 

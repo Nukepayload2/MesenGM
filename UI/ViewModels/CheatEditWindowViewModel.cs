@@ -46,7 +46,7 @@ namespace Mesen.ViewModels
 			}));
 
 			AddDisposable(Cheat.ObserveProp([nameof(CheatCode.Codes), nameof(CheatCode.Type)], () => {
-				string[] codes = cheat.Codes.Split(Environment.NewLine);
+				string[] codes = cheat.Codes.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 				StringBuilder sb = new StringBuilder();
 				bool hasInvalidCode = false;
 				bool hasValidCode = false;
