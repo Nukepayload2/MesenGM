@@ -62,23 +62,65 @@ void BaseEventManager::DrawDot(uint32_t x, uint32_t y, uint32_t color, bool draw
 void BaseEventManager::GetEvents(DebugEventInfo* eventArray, uint32_t& maxEventCount)
 {
 	auto lock = _lock.AcquireSafe();
-	uint32_t eventCount = std::min(maxEventCount, (uint32_t)_sentEvents.size());
+
+	// _sentEvents is the event viewer's snapshot and stays empty until that window is
+	// opened. Falling back to the rolling record keeps the debugger's event query usable
+	// without it, which is what a breakpoint-hunting tool needs.
+	vector<DebugEventInfo>& source = _sentEvents.empty() ? _recentEvents : _sentEvents;
+	uint32_t eventCount = std::min(maxEventCount, (uint32_t)source.size());
 	for(uint32_t i = 0; i < eventCount; i++) {
-		_sentEvents[i].Color = GetEventConfig(_sentEvents[i]).Color;
+		source[i].Color = GetEventConfig(source[i]).Color;
 	}
-	memcpy(eventArray, _sentEvents.data(), eventCount * sizeof(DebugEventInfo));
+	memcpy(eventArray, source.data(), eventCount * sizeof(DebugEventInfo));
 	maxEventCount = eventCount;
+}
+
+void BaseEventManager::GetRecentEvents(DebugEventInfo* eventArray, uint32_t& maxEventCount)
+{
+	auto lock = _lock.AcquireSafe();
+
+	// _recentEvents only holds frames that have already ended: events are archived when the
+	// next frame starts. A breakpoint that stopped the CPU in the middle of a frame is
+	// therefore still in _debugEvents and nowhere else, so append the frame in progress.
+	size_t total = _recentEvents.size() + _debugEvents.size();
+	uint32_t eventCount = (uint32_t)std::min<size_t>(maxEventCount, total);
+	size_t firstIndex = total - eventCount;
+
+	for(uint32_t i = 0; i < eventCount; i++) {
+		size_t pos = firstIndex + i;
+		if(pos < _recentEvents.size()) {
+			eventArray[i] = _recentEvents[pos];
+		} else {
+			eventArray[i] = _debugEvents[pos - _recentEvents.size()];
+		}
+		eventArray[i].Color = GetEventConfig(eventArray[i]).Color;
+	}
+	maxEventCount = eventCount;
+}
+
+void BaseEventManager::ArchiveFrameEvents()
+{
+	if(_debugEvents.empty()) {
+		return;
+	}
+
+	auto lock = _lock.AcquireSafe();
+	_recentEvents.insert(_recentEvents.end(), _debugEvents.begin(), _debugEvents.end());
+	if(_recentEvents.size() > MaxRecentEvents) {
+		_recentEvents.erase(_recentEvents.begin(), _recentEvents.begin() + (_recentEvents.size() - MaxRecentEvents));
+	}
 }
 
 uint32_t BaseEventManager::GetEventCount()
 {
 	auto lock = _lock.AcquireSafe();
 	FilterEvents();
-	return (uint32_t)_sentEvents.size();
+	return (uint32_t)(_sentEvents.empty() ? _recentEvents.size() : _sentEvents.size());
 }
 
 void BaseEventManager::ClearFrameEvents()
 {
+	ArchiveFrameEvents();
 	_prevDebugEvents = _debugEvents;
 	_debugEvents.clear();
 }

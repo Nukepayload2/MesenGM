@@ -87,6 +87,11 @@ private:
 
 	bool _waitForBreakResume = false;
 
+	//Reason for the most recent SleepUntilResume call, so a caller that only polls
+	//IsExecutionStopped (the MCP run_frames tool) can tell a breakpoint hit from a timeout.
+	BreakEvent _lastBreakEvent = {};
+	bool _hasLastBreakEvent = false;
+
 	void Reset();
 
 	__noinline bool ProcessStepBack(IDebugger* debugger);
@@ -136,6 +141,9 @@ public:
 	void Step(CpuType cpuType, int32_t stepCount, StepType type, BreakSource source = BreakSource::Unspecified);
 	bool IsPaused();
 	bool IsExecutionStopped();
+
+	bool HasLastBreakEvent() { return _hasLastBreakEvent; }
+	BreakEvent GetLastBreakEvent() { return _lastBreakEvent; }
 
 	bool HasBreakRequest();
 	void BreakRequest(bool release);

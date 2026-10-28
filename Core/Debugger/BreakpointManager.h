@@ -48,13 +48,17 @@ public:
 
 __forceinline bool BreakpointManager::HasBreakpointForType(MemoryOperationType opType)
 {
+	//Idle (9) has no breakpoint bucket: BreakpointTypeCount stops at PpuRenderingRead (8).
+	if((int)opType >= BreakpointTypeCount) {
+		return false;
+	}
 	return _hasBreakpointType[(int)opType];
 }
 
 template<uint8_t accessWidth>
 __forceinline int BreakpointManager::CheckBreakpoint(MemoryOperationInfo operationInfo, AddressInfo& address, bool processMarkedBreakpoints)
 {
-	if(!_hasBreakpointType[(int)operationInfo.Type]) {
+	if((int)operationInfo.Type >= BreakpointTypeCount || !_hasBreakpointType[(int)operationInfo.Type]) {
 		return -1;
 	}
 	return InternalCheckBreakpoint<accessWidth>(operationInfo, address, processMarkedBreakpoints);

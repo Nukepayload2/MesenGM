@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Mesen.Config;
 using Mesen.Debugger;
 using Mesen.Utilities;
@@ -227,6 +227,9 @@ namespace Mesen.Interop
 
 		[DllImport(DllPath)] public static extern void SetBreakpoints([MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] InteropBreakpoint[] breakpoints, UInt32 length);
 
+		[DllImport(DllPath)] public static extern Int32 GetLastBreakSource();
+		[DllImport(DllPath)] public static extern Int32 GetLastBreakBreakpointId();
+
 		[DllImport(DllPath)] public static extern void SetInputOverrides(UInt32 index, DebugControllerState state);
 		[DllImport(DllPath)] private static extern void GetAvailableInputOverrides([In, Out] byte[] availableIndexes);
 
@@ -399,6 +402,19 @@ namespace Mesen.Interop
 			DebugApi.GetDebugEventsWrapper(cpuType, debugEvents, ref maxEventCount);
 			if(maxEventCount < debugEvents.Length) {
 				//Remove the excess from the array if needed
+				Array.Resize(ref debugEvents, (int)maxEventCount);
+			}
+
+			return debugEvents;
+		}
+
+		[DllImport(DllPath, EntryPoint = "GetRecentDebugEvents")] private static extern void GetRecentDebugEventsWrapper(CpuType cpuType, [In, Out] DebugEventInfo[] eventArray, ref UInt32 maxEventCount);
+		public static DebugEventInfo[] GetRecentDebugEvents(CpuType cpuType, UInt32 maxEventCount)
+		{
+			DebugEventInfo[] debugEvents = new DebugEventInfo[maxEventCount];
+
+			DebugApi.GetRecentDebugEventsWrapper(cpuType, debugEvents, ref maxEventCount);
+			if(maxEventCount < debugEvents.Length) {
 				Array.Resize(ref debugEvents, (int)maxEventCount);
 			}
 

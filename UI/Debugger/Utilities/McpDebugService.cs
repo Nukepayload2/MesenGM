@@ -22,6 +22,10 @@ namespace Mesen.Debugger.Utilities
 		private const int MaxSearchResults = 1000;
 		private const int MaxSearchPattern = 256;
 
+		// Must match BaseEventManager::MaxRecentEvents: the core keeps this many events of
+		// rolling history, so asking for more only wastes a buffer.
+		private const int MaxDebugEventHistory = 512;
+
 		// Searches read the region in overlapping chunks instead of one buffer so a
 		// multi-megabyte ROM does not need a matching managed allocation.
 		private const int SearchChunkSize = 65536;
@@ -289,19 +293,19 @@ namespace Mesen.Debugger.Utilities
 				),
 				(JsonNode)MakeToolDef(
 					"get_debug_events",
-					"Get recent debugger events for one CPU.",
+					"Get recent debugger events for one CPU. Returns the newest retained events, including the frame that is still running, so a breakpoint that just stopped the CPU is listed as a Breakpoint event with its breakpoint_id.",
 					new JsonObject {
 						["type"] = "object",
 						["properties"] = new JsonObject {
 							["cpu_type"] = IntegerProperty("CPU type identifier. Omit it to use the loaded system's main CPU."),
-							["max_count"] = IntegerProperty("Maximum events to return.", minimum: 1, maximum: MaxTraceRows, defaultValue: 100)
+							["max_count"] = IntegerProperty("Maximum events to return, newest first.", minimum: 1, maximum: MaxTraceRows, defaultValue: 100)
 						}
 					},
 					readOnly: true
 				),
 				(JsonNode)MakeToolDef(
 					"set_breakpoints",
-					"Replace all debugger breakpoints. Breakpoint flags are Read=1, Write=2, Execute=4, and Forbid=8.",
+					"Replace all debugger breakpoints. Breakpoint flags are Read=1, Write=2, Execute=4, and Forbid=8. Addresses are matched against the breakpoint's memory_type; omit memory_type to use the CPU's relative memory, which is what an instruction or RAM address is expressed in.",
 					new JsonObject {
 						["type"] = "object",
 						["required"] = StringArray("breakpoints"),
@@ -319,6 +323,7 @@ namespace Mesen.Debugger.Utilities
 										["cpu_type"] = IntegerProperty("CPU type identifier. Omit it to use the loaded system's main CPU."),
 										["memory_type"] = IntegerProperty("MemoryType identifier. Omit it to use the CPU's relative memory."),
 										["enabled"] = new JsonObject { ["type"] = "boolean", ["default"] = true },
+										["mark_events"] = new JsonObject { ["type"] = "boolean", ["default"] = true, ["description"] = "Record hits in the debug event stream so get_debug_events reports them." },
 										["condition"] = new JsonObject { ["type"] = "string", ["maxLength"] = 999 }
 									}
 								}
@@ -343,7 +348,7 @@ namespace Mesen.Debugger.Utilities
 				),
 				(JsonNode)MakeToolDef(
 					"run_frames",
-					"Advance emulation from the current frame by a number of frames, then stop in the debugger. Returns the frames actually elapsed. Keeps the total wait within the tool's 10-second budget.",
+					"Advance emulation from the current frame by a number of frames, then stop in the debugger. Returns the frames actually elapsed. Stops early and reports stopped_by_breakpoint when a breakpoint fires before the frame target is reached. Keeps the total wait within the tool's 10-second budget.",
 					new JsonObject {
 						["type"] = "object",
 						["required"] = StringArray("frames"),
@@ -1026,9 +1031,18 @@ namespace Mesen.Debugger.Utilities
 		{
 			CpuType cpuType = GetCpuType(arguments);
 			int maxCount = OptionalInt(arguments, "max_count", 100, 1, MaxTraceRows);
-			DebugEventInfo[] events = DebugApi.GetDebugEvents(cpuType);
+
+			//Read the rolling history rather than the event viewer's snapshot: the viewer only
+			//refreshes while its window is open, and the events of the frame that is still
+			//running (a breakpoint that just stopped the CPU) are missing from the snapshot.
+			DebugEventInfo[] events = DebugApi.GetRecentDebugEvents(cpuType, MaxDebugEventHistory);
 			JsonArray output = new();
-			for(int index = 0; index < Math.Min(events.Length, maxCount); index++) {
+
+			// Report the newest events, matching get_trace_tail: a poller that runs frames
+			// and then asks wants the tail, not the oldest entries in the record.
+			int total = events.Length;
+			int startIndex = Math.Max(0, total - maxCount);
+			for(int index = startIndex; index < total; index++) {
 				DebugEventInfo debugEvent = events[index];
 				output.Add((JsonNode)new JsonObject {
 					["type"] = debugEvent.Type.ToString(),
@@ -1042,6 +1056,8 @@ namespace Mesen.Debugger.Utilities
 			return new JsonObject {
 				["cpu_type"] = (int)cpuType,
 				["count"] = output.Count,
+				["total"] = total,
+				["history_limit"] = MaxDebugEventHistory,
 				["events"] = output
 			};
 		}
@@ -1088,16 +1104,21 @@ namespace Mesen.Debugger.Utilities
 					StartAddress = startAddress,
 					EndAddress = endAddress,
 					Enabled = value["enabled"]?.GetValue<bool>() ?? true,
-					MarkEvent = false,
+					// The core only records a breakpoint hit into the debug event stream
+					// for breakpoints marked this way; without it get_debug_events can
+					// never report a hit. Marked by default so the two tools compose.
+					MarkEvent = value["mark_events"]?.GetValue<bool>() ?? true,
 					IgnoreDummyOperations = false,
 					Condition = conditionBuffer
 				};
 			}
 
 			DebugApi.SetBreakpoints(breakpoints, (uint)breakpoints.Length);
+			int markedCount = breakpoints.Count(bp => bp.MarkEvent);
 			return new JsonObject {
 				["success"] = true,
-				["breakpoints_set"] = breakpoints.Length
+				["breakpoints_set"] = breakpoints.Length,
+				["marked"] = markedCount
 			};
 		}
 
@@ -1150,9 +1171,24 @@ namespace Mesen.Debugger.Utilities
 
 			DebugApi.InitializeDebugger();
 			uint startFrame = EmuApi.GetTimingInfo(cpuType).FrameCount;
+
+			//A breakpoint that fired while no run was in flight is parked here. Resuming
+			//releases that stop, so report it rather than letting the caller conclude the hit
+			//never happened; the hit itself stays in the get_debug_events history.
+			int previousSource = DebugApi.IsExecutionStopped() ? DebugApi.GetLastBreakSource() : -1;
+
 			DebugApi.ResumeExecution();
 
+			//ResumeExecution only clears the debugger's wait flag; the emulation thread still
+			//has to leave its wait loop. Wait for that first, otherwise the still-stopped
+			//state of a previous call reads as a breakpoint hit in the loop below.
+			DateTime resumeDeadline = DateTime.UtcNow.AddMilliseconds(500);
+			while(DebugApi.IsExecutionStopped() && DateTime.UtcNow < resumeDeadline) {
+				Thread.Sleep(1);
+			}
+
 			bool timedOut = false;
+			bool stoppedByBreakpoint = false;
 			uint elapsed = 0;
 			DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
 			while(true) {
@@ -1162,6 +1198,12 @@ namespace Mesen.Debugger.Utilities
 					break;
 				}
 				if(!EmuApi.IsRunning()) {
+					break;
+				}
+				if(DebugApi.IsExecutionStopped()) {
+					//A breakpoint stopped the CPU before the frame target was reached. Report it
+					//as a stop, not as a timeout: the caller can read the id and resume.
+					stoppedByBreakpoint = DebugApi.GetLastBreakSource() == (int)BreakSource.Breakpoint;
 					break;
 				}
 				if(DateTime.UtcNow >= deadline) {
@@ -1182,15 +1224,29 @@ namespace Mesen.Debugger.Utilities
 			}
 
 			elapsed = EmuApi.GetTimingInfo(cpuType).FrameCount - startFrame;
-			return new JsonObject {
+			int breakSource = executionStopped ? DebugApi.GetLastBreakSource() : -1;
+			JsonObject result = new JsonObject {
 				["success"] = elapsed >= (uint)frames,
 				["frames_requested"] = frames,
 				["frames_elapsed"] = elapsed,
 				["timed_out"] = timedOut,
+				["stopped_by_breakpoint"] = stoppedByBreakpoint,
+				["breakpoint_id"] = executionStopped ? DebugApi.GetLastBreakBreakpointId() : -1,
 				["execution_stopped"] = executionStopped,
 				["emulation_running"] = EmuApi.IsRunning(),
 				["cpu_type"] = (int)cpuType
 			};
+
+			if(breakSource >= 0) {
+				result["break_source"] = ((BreakSource)breakSource).ToString();
+				result["pc"] = DebugApi.GetProgramCounter(cpuType, false);
+			}
+
+			if(previousSource == (int)BreakSource.Breakpoint) {
+				result["resumed_from"] = "Breakpoint";
+			}
+
+			return result;
 		}
 
 		private static JsonObject SetInput(JsonObject? arguments)

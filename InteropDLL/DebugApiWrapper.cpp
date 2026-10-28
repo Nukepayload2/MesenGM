@@ -136,6 +136,26 @@ extern "C"
 		WithDebugger(void, SetBreakpoints(breakpoints, length));
 	}
 
+	DllExport int32_t __stdcall GetLastBreakSource()
+	{
+		return WrapDebuggerCall<int32_t>([](Debugger* dbg) -> int32_t {
+			if(!dbg->HasLastBreakEvent()) {
+				return -1;
+			}
+			return (int32_t)dbg->GetLastBreakEvent().Source;
+		});
+	}
+
+	DllExport int32_t __stdcall GetLastBreakBreakpointId()
+	{
+		return WrapDebuggerCall<int32_t>([](Debugger* dbg) -> int32_t {
+			if(!dbg->HasLastBreakEvent()) {
+				return -1;
+			}
+			return dbg->GetLastBreakEvent().BreakpointId;
+		});
+	}
+
 	DllExport void __stdcall SetInputOverrides(uint32_t index, DebugControllerState state)
 	{
 		WithDebugger(void, SetInputOverrides(index, state));
@@ -432,6 +452,11 @@ extern "C"
 	DllExport uint32_t __stdcall GetDebugEventCount(CpuType cpuType)
 	{
 		return WithTool(uint32_t, GetEventManager(cpuType), GetEventCount());
+	}
+
+	DllExport void __stdcall GetRecentDebugEvents(CpuType cpuType, DebugEventInfo* infoArray, uint32_t& maxEventCount)
+	{
+		WithToolVoid(GetEventManager(cpuType), GetRecentEvents(infoArray, maxEventCount));
 	}
 
 	DllExport FrameInfo __stdcall GetEventViewerDisplaySize(CpuType cpuType)

@@ -94,7 +94,11 @@ The **MCP Server** window shows the bridge's own status and log output, so a fai
 
 `close_rom` takes no arguments. It stops emulation if it is running and returns `success` and `was_running`. It does not release the emulator instance or close Mesen. After it returns, `get_rom_info` reports `rom_loaded: false`, and the other ROM-dependent tools fail with "No ROM is loaded."
 
-`run_frames` advances emulation from the current frame and then stops in the debugger. Its `timeout_ms` is capped at 7000 so the call stays inside the server's 10-second tool budget; the result reports whether the requested frame count was reached.
+`run_frames` advances emulation from the current frame and then stops in the debugger. Its `timeout_ms` is capped at 7000 so the call stays inside the server's 10-second tool budget; the result reports whether the requested frame count was reached. A breakpoint that fires before the target stops the run early: the result then carries `stopped_by_breakpoint: true` with `breakpoint_id`, `break_source`, and `pc`, and `timed_out` stays false.
+
+`get_debug_events` returns the newest retained debugger events, up to a rolling history of 512, including the frame that is still running. That makes a breakpoint hit visible immediately as a `Breakpoint` event with its `breakpoint_id`, without waiting for the next frame and without the Event Viewer window being open. `total` reports how many events the history holds and `history_limit` the cap.
+
+`set_breakpoints` replaces the whole list. Each entry defaults to an execute breakpoint in the CPU's relative memory, which is the address space instruction and RAM addresses are expressed in. `mark_events` defaults to true so hits reach `get_debug_events`; a breakpoint that matches every frame keeps the CPU stopped until `resume`, `step`, or the next `run_frames`. With predictive breakpoints enabled (Mesen's default) the stop can land on the instruction that is about to access the address, so a reported hit may have no `Breakpoint` event yet.
 
 `set_input` holds the given buttons on one controller and the override persists until `clear_input` or another `set_input` replaces it. It does not release automatically when execution stops, so call `clear_input` when the input is no longer wanted.
 

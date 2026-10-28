@@ -483,6 +483,20 @@ void Debugger::SleepUntilResume(CpuType sourceCpu, BreakSource source, MemoryOpe
 		return;
 	}
 
+	BreakEvent evt = {};
+	evt.SourceCpu = sourceCpu;
+	evt.BreakpointId = breakpointId;
+	evt.Source = source;
+	if(operation) {
+		evt.Operation = *operation;
+	}
+
+	//Record the reason before flagging the stop: a caller that only polls
+	//IsExecutionStopped() (the MCP run_frames tool) must never observe a stopped CPU whose
+	//reason has not been written yet.
+	_lastBreakEvent = evt;
+	_hasLastBreakEvent = true;
+
 	_executionStopped = true;
 
 	bool notificationSent = false;
@@ -499,14 +513,6 @@ void Debugger::SleepUntilResume(CpuType sourceCpu, BreakSource source, MemoryOpe
 		}
 
 		//Only trigger code break event if the pause was caused by user action
-		BreakEvent evt = {};
-		evt.SourceCpu = sourceCpu;
-		evt.BreakpointId = breakpointId;
-		evt.Source = source;
-		if(operation) {
-			evt.Operation = *operation;
-		}
-
 		_waitForBreakResume = true;
 		_emu->GetNotificationManager()->SendNotification(ConsoleNotificationType::CodeBreak, &evt);
 		ProcessEvent(EventType::CodeBreak, sourceCpu);
@@ -695,6 +701,7 @@ int64_t Debugger::EvaluateExpression(string expression, CpuType cpuType, EvalRes
 
 void Debugger::Run()
 {
+	_hasLastBreakEvent = false;
 	for(int i = 0; i <= (int)DebugUtilities::GetLastCpuType(); i++) {
 		if(_debuggers[i].Debugger) {
 			_debuggers[i].Debugger->ResetStepBackCache();
@@ -729,6 +736,7 @@ void Debugger::PauseOnNextFrame()
 
 void Debugger::Step(CpuType cpuType, int32_t stepCount, StepType type, BreakSource source)
 {
+	_hasLastBreakEvent = false;
 	DebugBreakHelper helper(this);
 	IDebugger* debugger = _debuggers[(int)cpuType].Debugger.get();
 

@@ -48,6 +48,12 @@ protected:
 	vector<DebugEventInfo> _prevDebugEvents;
 	vector<DebugEventInfo> _sentEvents;
 
+	// Rolling record of the events seen in the last frames. The event viewer only fills
+	// _sentEvents while its window is open, so a tool that asks the debugger for recent
+	// events (MCP get_debug_events) needs a source that does not depend on that window.
+	vector<DebugEventInfo> _recentEvents;
+	static constexpr size_t MaxRecentEvents = 512;
+
 	vector<DebugEventInfo> _snapshotCurrentFrame;
 	vector<DebugEventInfo> _snapshotPrevFrame;
 	int16_t _snapshotScanline = -1;
@@ -55,6 +61,8 @@ protected:
 	uint16_t _snapshotCycle = 0;
 	bool _forAutoRefresh = false;
 	SimpleLock _lock;
+
+	void ArchiveFrameEvents();
 
 	virtual bool ShowPreviousFrameEvents() = 0;
 
@@ -79,6 +87,7 @@ public:
 
 	void GetEvents(DebugEventInfo* eventArray, uint32_t& maxEventCount);
 	uint32_t GetEventCount();
+	void GetRecentEvents(DebugEventInfo* eventArray, uint32_t& maxEventCount);
 	virtual void ClearFrameEvents();
 
 	virtual EventViewerCategoryCfg GetEventConfig(DebugEventInfo& evt) = 0;

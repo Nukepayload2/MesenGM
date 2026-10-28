@@ -13,7 +13,7 @@ Check the live tool schema first. These details reflect `McpDebugService.cs` in 
 | `get_screen` | Optional `apply_video_filter` (default false) and `include_base64` (default false). Returns the last rendered frame as an `image/png` content block plus `width`, `height`, `byte_length`, `frame_count`, `emulation_paused`. Fails until at least one frame has been rendered. |
 | `get_disassembly` | Optional `cpu_type`, `address`, `line_count` (1-100, default 20). Omitting `address` centers on the current PC. |
 | `get_trace_tail` | `count` (1-1000, default 100), `offset` (default 0, measured from the newest entry). No `cpu_type` argument. |
-| `get_debug_events` | Optional `cpu_type`, `max_count` (1-1000, default 100). Returns event type, PC, scanline, cycle and breakpoint ID. |
+| `get_debug_events` | Optional `cpu_type`, `max_count` (1-1000, default 100). Returns the newest retained events with event type, PC, scanline, cycle and breakpoint ID, plus `total` and `history_limit`. |
 
 ## ROM lifecycle
 
@@ -37,9 +37,14 @@ Check the live tool schema first. These details reflect `McpDebugService.cs` in 
 - `memory_type`: defaults to that CPU's relative memory.
 - `type`: flags Read=1, Write=2, Execute=4, Forbid=8. Combine needed flags; default 4.
 - `enabled`: defaults to true.
+- `mark_events`: defaults to true and records hits in the debug event stream so `get_debug_events` lists them. Set it to false for a breakpoint that must stop execution without appearing in the event list.
 - `condition`: debugger expression; must fit within 999 UTF-8 bytes. Use this project's debugger expression syntax rather than guessing a programming-language expression.
 
-The call replaces all breakpoints. IDs are assigned from array indices. It does not return the previous list.
+The call replaces all breakpoints. IDs are assigned from array indices. It does not return the previous list. The response echoes `breakpoints_set` and `marked` (how many entries keep `mark_events`).
+
+`memory_type` decides what the address is compared against. The default, the CPU's relative memory, is the address space an instruction operand or a RAM address is written in, so a RAM or stack breakpoint needs it. A breakpoint on a non-default region is matched against that region's own address space instead.
+
+A hit stops the CPU: the next `run_frames` reports `stopped_by_breakpoint: true` with `breakpoint_id`, `break_source` and `pc`, and `get_debug_events` lists a `Breakpoint` event once the access executes. Three things follow from that. First, `frames_elapsed` stays below `frames_requested` and `timed_out` is false; a hit is not a timeout. Second, the CPU stays stopped until `resume`, `step` or the next `run_frames`, so a breakpoint that matches every frame freezes the run until it is removed. Third, with predictive breakpoints enabled (Mesen's default) the stop lands on the instruction that is about to access the address and can precede the access, so the hit may be reported with no `Breakpoint` event yet; turn predictive breakpoints off in Mesen's debugger settings when the event stream must contain every hit.
 
 ## Execution
 
@@ -63,7 +68,7 @@ The call replaces all breakpoints. IDs are assigned from array indices. It does 
 
 ## Input and frame advance
 
-- `run_frames`: required `frames` (1-100000). Optional `cpu_type` (defaults to the main CPU) and `timeout_ms` (100-7000, default 5000). Resumes execution, waits until that many frames have elapsed on the selected CPU, then stops in the debugger. Returns `success`, `frames_requested`, `frames_elapsed`, `timed_out`, `execution_stopped`, `emulation_running`, and `cpu_type`. `success` is false when the frame target was not reached because of the timeout or because emulation stopped. `frames_elapsed` can overshoot the request by a frame because it is sampled by polling. Fails when emulation is not running. The server times out tool calls after 10 seconds, and stopping can add up to one second, so keep `timeout_ms` at or below 7000.
+- `run_frames`: required `frames` (1-100000). Optional `cpu_type` (defaults to the main CPU) and `timeout_ms` (100-7000, default 5000). Resumes execution, waits until that many frames have elapsed on the selected CPU, then stops in the debugger. Returns `success`, `frames_requested`, `frames_elapsed`, `timed_out`, `stopped_by_breakpoint`, `breakpoint_id`, `execution_stopped`, `emulation_running`, and `cpu_type`; `break_source` and `pc` are present when execution is stopped for a reason known to the debugger. `success` is false when the frame target was not reached because of the timeout, a breakpoint, or emulation stopping; read `stopped_by_breakpoint` to tell a breakpoint from a timeout. `frames_elapsed` can overshoot the request by a frame because it is sampled by polling. Fails when emulation is not running. The server times out tool calls after 10 seconds, and stopping can add up to one second, so keep `timeout_ms` at or below 7000. Every call resumes the CPU, so a breakpoint that fired while no run was in flight is released; that case is reported as `resumed_from: "Breakpoint"` and the hit stays in the `get_debug_events` history.
 - `set_input`: optional `controller` (0-7, default 0) and required `buttons` array. Button names are case-insensitive: `A`, `B`, `X`, `Y`, `L`, `R`, `U`, `D`, `Up`, `Down`, `Left`, `Right`, `Select`, `Start`. Unknown names are rejected with the valid list. A controller that is not available for the loaded ROM is rejected with the list of available controllers; configure the input port in Mesen if needed. The call replaces the override for that controller and returns `success`, `controller`, normalized uppercase `buttons`, `available_controllers`, and `debugger_running`.
 - `clear_input`: optional `controller` (0-7, default 0). Sets an all-released override for that controller and returns the same shape as `set_input` with an empty `buttons` array. It does not fail when the controller is unavailable; `available_controllers` reports the controllers that actually exist.
 
